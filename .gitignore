@@ -1,0 +1,42 @@
+# dependencies
+node_modules/
+
+# environment files / secrets
+.env
+.env.*
+!.env.example
+
+# logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# test / coverage output
+coverage/
+.nyc_output/
+
+# build / runtime output
+dist/
+build/
+tmp/
+temp/
+.cache/
+
+# process managers
+*.pid
+*.seed
+*.pid.lock
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# local certificates / keys
+*.pem
+*.key
+*.crt

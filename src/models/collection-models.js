@@ -1,0 +1,22 @@
+export const collections = {
+  accounts: "accounts",
+  aiConfig: "ai_configs",
+  aiKnowledge: "ai_knowledge",
+  apiKeys: "api_keys",
+  automations: "automations",
+  automationSteps: "automation_steps",
+  broadcasts: "broadcasts",
+  contacts: "contacts",
+  contactTags: "contact_tags",
+  conversations: "conversations",
+  flows: "flows",
+  flowNodes: "flow_nodes",
+  invitations: "account_invitations",
+  messages: "messages",
+  quickReplies: "quick_replies",
+  tags: "tags",
+  webhooks: "webhook_endpoints",
+  whatsappConfig: "whatsapp_configs",
+  whatsappTemplates: "whatsapp_templates",
+};
+
