@@ -1,8 +1,10 @@
 import express from "express";
+import crypto from "node:crypto";
 import mongoose from "mongoose";
 
 import { AccountMember } from "../models/account-member.js";
 import { requireAuth } from "../middleware/auth.js";
+import { sendMessageForAccount } from "../services/whatsapp-service.js";
 
 const router = express.Router();
 
@@ -86,12 +88,28 @@ function requireRole(minRole) {
 router.use(requireAuth);
 router.use(attachAccount);
 
-router.post("/cron", async (_req, res) => {
-  return res.json({ ok: true, processed: 0 });
+router.post("/cron", async (req, res) => {
+  const automations = await collection("automations")
+    .find({ ...accountScope(req.accountId), is_active: true, trigger_type: { $in: ["scheduled", "cron"] } })
+    .toArray();
+  let processed = 0;
+  for (const automation of automations) {
+    await executeAutomation(req, automation, { trigger_event: "cron" });
+    processed += 1;
+  }
+  return res.json({ ok: true, processed });
 });
 
-router.post("/engine", requireRole("agent"), async (_req, res) => {
-  return res.json({ ok: true });
+router.post("/engine", requireRole("agent"), async (req, res) => {
+  const triggerType = req.body?.trigger_type || req.body?.event || "manual";
+  const automations = await collection("automations")
+    .find({ ...accountScope(req.accountId), is_active: true, $or: [{ trigger_type: triggerType }, { trigger_type: "manual" }] })
+    .toArray();
+  const results = [];
+  for (const automation of automations) {
+    results.push(await executeAutomation(req, automation, { trigger_event: triggerType, contact_id: req.body?.contact_id }));
+  }
+  return res.json({ ok: true, processed: results.length, results });
 });
 
 router.get("/", async (req, res) => {
@@ -306,6 +324,77 @@ async function loadStepsTree(automationId) {
   }
 
   return roots;
+}
+
+async function executeAutomation(req, automation, context = {}) {
+  const steps = await loadStepsTree(automation._id.toString());
+  const executed = [];
+  let status = "success";
+  let errorMessage = null;
+
+  async function runStep(step) {
+    try {
+      const cfg = step.step_config ?? {};
+      if (step.step_type === "send_message" || step.step_type === "send_template") {
+        if (!context.contact_id && !cfg.contact_id) {
+          executed.push({ step_id: step.id, step_type: step.step_type, status: "skipped", detail: "No contact_id supplied" });
+          return;
+        }
+        await sendMessageForAccount({
+          accountId: req.accountId,
+          userId: req.userId,
+          contactId: context.contact_id || cfg.contact_id,
+          body: {
+            message_type: step.step_type === "send_template" ? "template" : (cfg.message_type || "text"),
+            content_text: cfg.content_text || cfg.message || "",
+            template_name: cfg.template_name,
+            template_language: cfg.language || cfg.template_language,
+            template_params: cfg.template_params || [],
+            media_url: cfg.media_url,
+          },
+          senderType: "bot",
+        });
+      } else if (step.step_type === "update_contact_field" && context.contact_id) {
+        await collection("contacts").updateOne(
+          { _id: parseId(context.contact_id), ...accountScope(req.accountId) },
+          { $set: { [cfg.field || "status"]: cfg.value, updated_at: new Date().toISOString() } },
+        );
+      } else if (step.step_type === "add_tag" && context.contact_id && cfg.tag_id) {
+        await collection("contact_tags").updateOne(
+          { contact_id: context.contact_id, tag_id: cfg.tag_id },
+          { $setOnInsert: { accountId: req.accountId, contact_id: context.contact_id, tag_id: cfg.tag_id } },
+          { upsert: true },
+        );
+      }
+      executed.push({ step_id: step.id, step_type: step.step_type, status: "success" });
+    } catch (err) {
+      status = "failed";
+      errorMessage = err.message;
+      executed.push({ step_id: step.id, step_type: step.step_type, status: "failed", detail: err.message });
+    }
+  }
+
+  for (const step of steps) {
+    await runStep(step);
+  }
+
+  await collection("automation_logs").insertOne({
+    accountId: req.accountId,
+    automation_id: automation._id.toString(),
+    userId: req.userId,
+    contact_id: context.contact_id || null,
+    trigger_event: context.trigger_event || automation.trigger_type,
+    steps_executed: executed,
+    status,
+    error_message: errorMessage,
+    created_at: new Date().toISOString(),
+  });
+  await collection("automations").updateOne(
+    { _id: automation._id },
+    { $inc: { execution_count: 1 }, $set: { last_executed_at: new Date().toISOString(), updated_at: new Date().toISOString() } },
+  );
+
+  return { automation_id: automation._id.toString(), status, steps_executed: executed };
 }
 
 export default router;

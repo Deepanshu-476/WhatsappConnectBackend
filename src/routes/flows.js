@@ -6,7 +6,24 @@ import { attachAccount, requireAccountRole } from "../middleware/account-context
 
 const router = express.Router();
 router.get("/templates", (_req, res) => {
-  res.json({ templates: [] });
+  res.json({
+    templates: [
+      {
+        id: "lead-qualification",
+        name: "Lead qualification",
+        description: "Ask a question, tag the contact, then hand off to an agent.",
+        nodes: [],
+        edges: [],
+      },
+      {
+        id: "faq-menu",
+        name: "FAQ menu",
+        description: "Send a menu and route replies to answer nodes.",
+        nodes: [],
+        edges: [],
+      },
+    ],
+  });
 });
 
 router.use(requireAuth);
@@ -17,8 +34,13 @@ router.post("/:id/activate", requireAuth, attachAccount, requireAccountRole("age
   return flowsController.update(req, res);
 });
 
-router.get("/:id/runs", (_req, res) => {
-  res.json({ runs: [] });
+router.get("/:id/runs", async (req, res) => {
+  const { collection, accountScope } = await import("../utils/crud.js");
+  const runs = await collection("flow_runs")
+    .find({ flow_id: req.params.id, ...accountScope(req.accountId) })
+    .sort({ created_at: -1, _id: -1 })
+    .toArray();
+  res.json({ runs: runs.map((run) => ({ ...run, id: run._id?.toString?.() ?? run.id })) });
 });
 
 router.get("/", flowsController.list);
@@ -29,4 +51,3 @@ router.put("/:id", requireAccountRole(flowsController.minWriteRole), flowsContro
 router.delete("/:id", requireAccountRole(flowsController.minWriteRole), flowsController.remove);
 
 export default router;
-
