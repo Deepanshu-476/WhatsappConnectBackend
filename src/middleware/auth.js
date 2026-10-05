@@ -11,22 +11,34 @@ export function signSession(userId) {
 }
 
 export function setSessionCookie(res, token) {
-  res.cookie("wacrm_session", token, {
+  const cookieOptions = {
     httpOnly: true,
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",
     maxAge: 7 * 24 * 60 * 60 * 1000,
     path: "/",
-  });
+  };
+
+  if (process.env.COOKIE_DOMAIN) {
+    cookieOptions.domain = process.env.COOKIE_DOMAIN;
+  }
+
+  res.cookie("wacrm_session", token, cookieOptions);
 }
 
 export function clearSessionCookie(res) {
-  res.clearCookie("wacrm_session", {
+  const cookieOptions = {
     httpOnly: true,
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",
     path: "/",
-  });
+  };
+
+  if (process.env.COOKIE_DOMAIN) {
+    cookieOptions.domain = process.env.COOKIE_DOMAIN;
+  }
+
+  res.clearCookie("wacrm_session", cookieOptions);
 }
 
 export function requireAuth(req, res, next) {
