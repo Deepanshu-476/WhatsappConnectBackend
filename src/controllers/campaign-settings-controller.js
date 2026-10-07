@@ -211,14 +211,12 @@ export const campaignSettingsController = {
   async testChannel(req, res) {
     try {
       const { channelId, phoneNumber } = req.body || {};
-      return res.json({
-        ok: true,
-        channelId: channelId || "primary",
-        phoneNumber: phoneNumber || "+91 92059 62984",
-        status: "connected",
-        qualityRating: "GREEN",
-        messagingLimit: "TIER_100K",
-        message: "Channel is connected and ready for campaign broadcasts.",
+      return res.status(424).json({
+        ok: false,
+        channelId: channelId || null,
+        phoneNumber: phoneNumber || null,
+        status: "configuration_required",
+        message: "Campaign channel verification requires a configured WhatsApp channel and live Meta credentials. No live connection was verified.",
         testedAt: new Date().toISOString(),
       });
     } catch (err) {
@@ -229,12 +227,11 @@ export const campaignSettingsController = {
   async testIntegration(req, res) {
     try {
       const { integrationId } = req.body || {};
-      return res.json({
-        ok: true,
+      return res.status(424).json({
+        ok: false,
         integrationId,
-        status: "connected",
-        latencyMs: 84,
-        message: `Integration '${integrationId}' verified successfully.`,
+        status: "configuration_required",
+        message: `Integration '${integrationId || "unknown"}' cannot be verified until real provider credentials and a verifier are configured.`,
         testedAt: new Date().toISOString(),
       });
     } catch (err) {

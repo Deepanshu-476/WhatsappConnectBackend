@@ -4,6 +4,7 @@ import mongoose from "mongoose";
 
 import { AccountMember } from "../models/account-member.js";
 import { requireAuth } from "../middleware/auth.js";
+import { requireFeature } from "../middleware/subscription-guard.js";
 import { sendMessageForAccount } from "../services/whatsapp-service.js";
 
 const router = express.Router();
@@ -126,7 +127,7 @@ router.get("/", async (req, res) => {
   }
 });
 
-router.post("/", requireRole("agent"), async (req, res) => {
+router.post("/", requireRole("agent"), requireFeature("automations"), async (req, res) => {
   try {
     const body = req.body ?? {};
     if (!body.name || !body.trigger_type) {

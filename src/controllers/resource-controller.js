@@ -1,4 +1,24 @@
-import { accountScope, collection, parseId, publicDoc, timestamps } from "../utils/crud.js";
+import { collections } from "../models/collection-models.js";
+import { accountScope, collection, parseId, publicDoc, stripSecrets, timestamps } from "../utils/crud.js";
+
+async function writeAuditLog(req, action, collectionName, entityId, metadata = {}) {
+  if (!req.accountId && !req.userId) return;
+  try {
+    await collection(collections.auditLogs).insertOne({
+      accountId: req.accountId || null,
+      userId: req.userId || null,
+      action,
+      entity: collectionName,
+      entityId: entityId?.toString?.() ?? entityId ?? null,
+      metadata: stripSecrets(metadata),
+      ip: req.ip,
+      userAgent: req.get?.("user-agent") || "",
+      created_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error("[auditLog] failed:", err);
+  }
+}
 
 export function resourceController(collectionName, options = {}) {
   const {
@@ -46,6 +66,7 @@ export function resourceController(collectionName, options = {}) {
         delete doc._id;
 
         const result = await collection(collectionName).insertOne(doc);
+        await writeAuditLog(req, "create", collectionName, result.insertedId, { fields: Object.keys(doc) });
         return res.status(201).json({ item: publicDoc({ _id: result.insertedId, ...doc }), data: publicDoc({ _id: result.insertedId, ...doc }) });
       } catch (err) {
         console.error(`[POST ${collectionName}] error:`, err);
@@ -76,6 +97,7 @@ export function resourceController(collectionName, options = {}) {
           { returnDocument: "after" },
         );
         if (!result) return res.status(404).json({ error: "Not found" });
+        await writeAuditLog(req, "update", collectionName, result._id, { fields: Object.keys(update) });
         return res.json({ item: publicDoc(result), data: publicDoc(result) });
       } catch (err) {
         console.error(`[PATCH ${collectionName}/:id] error:`, err);
@@ -85,7 +107,9 @@ export function resourceController(collectionName, options = {}) {
 
     async remove(req, res) {
       try {
-        await collection(collectionName).deleteOne(scopedQuery(req, { _id: parseId(req.params.id) }));
+        const result = await collection(collectionName).deleteOne(scopedQuery(req, { _id: parseId(req.params.id) }));
+        if (result.deletedCount === 0) return res.status(404).json({ error: "Not found" });
+        await writeAuditLog(req, "delete", collectionName, req.params.id);
         return res.json({ ok: true });
       } catch (err) {
         console.error(`[DELETE ${collectionName}/:id] error:`, err);

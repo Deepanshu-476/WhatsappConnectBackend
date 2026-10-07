@@ -3,6 +3,54 @@ import { collection, accountScope, parseId, timestamps } from "../utils/crud.js"
 import { collections } from "../models/collection-models.js";
 import * as campaignWorker from "../services/campaign-worker.js";
 
+function isLaunchRequest(body = {}) {
+  return body.launchImmediately || body.status === "running";
+}
+
+function getRequestedChannelId(body = {}) {
+  return body.channelId || body.channel_id || body.channel?.id || body.channel?._id || null;
+}
+
+function getRequestedTemplateId(body = {}) {
+  return body.templateId || body.template_id || body.template?.id || body.template?._id || null;
+}
+
+async function validateCampaignLaunch(req, body, audienceResult) {
+  const channelId = getRequestedChannelId(body);
+  if (!channelId) {
+    throw Object.assign(new Error("WhatsApp channel configuration is required before this campaign can be launched."), { status: 400 });
+  }
+
+  const channel = await collection(collections.channelConfigs).findOne({
+    _id: parseId(channelId),
+    ...accountScope(req.accountId),
+  });
+  if (!channel) {
+    throw Object.assign(new Error("Selected WhatsApp channel was not found for this account."), { status: 404 });
+  }
+  if (channel.status !== "connected" || channel.connectionState !== "connected") {
+    throw Object.assign(new Error("WhatsApp channel configuration is required before this campaign can be launched."), { status: 409 });
+  }
+
+  const templateId = getRequestedTemplateId(body);
+  const templateQuery = templateId
+    ? { _id: parseId(templateId), ...accountScope(req.accountId) }
+    : { name: body.template?.name, language: body.template?.language || body.template?.language_code || "en_US", ...accountScope(req.accountId) };
+  const template = await collection(collections.whatsappTemplates).findOne(templateQuery);
+  if (!template) {
+    throw Object.assign(new Error("Selected WhatsApp template was not found for this account."), { status: 404 });
+  }
+  if (String(template.status || "").toUpperCase() !== "APPROVED") {
+    throw Object.assign(new Error("Only approved WhatsApp templates can be launched."), { status: 409 });
+  }
+
+  if (audienceResult.eligibleCount === 0) {
+    throw Object.assign(new Error("Cannot launch campaign with 0 eligible contacts."), { status: 400 });
+  }
+
+  return { channel, template };
+}
+
 export const campaignsController = {
   async listCampaigns(req, res) {
     try {
@@ -108,12 +156,9 @@ export const campaignsController = {
       // Pre-validate audience
       const audienceResult = await campaignWorker.validateAudience(req.accountId, body.audience || {});
 
-      if ((body.launchImmediately || body.status === "running") && audienceResult.eligibleCount === 0) {
-        return res.status(400).json({ error: "Cannot launch campaign with 0 eligible contacts." });
-      }
-
-      if ((body.launchImmediately || body.status === "running") && (!body.template || !body.template.name)) {
-        return res.status(400).json({ error: "Approved WhatsApp template is required to launch campaign." });
+      let launchConfig = null;
+      if (isLaunchRequest(body)) {
+        launchConfig = await validateCampaignLaunch(req, body, audienceResult);
       }
 
       const recipients = audienceResult.eligibleContacts.map((c) => ({
@@ -143,9 +188,26 @@ export const campaignsController = {
           invalidCount: audienceResult.invalidCount,
           duplicateCount: audienceResult.duplicateCount,
         },
-        template: body.template || { name: "" },
+        template: launchConfig?.template
+          ? {
+              id: launchConfig.template._id.toString(),
+              name: launchConfig.template.name,
+              language: launchConfig.template.language || "en_US",
+              category: launchConfig.template.category || "",
+              components: launchConfig.template.components || [],
+              status: launchConfig.template.status,
+            }
+          : body.template || { name: "" },
         variableMappings: body.variableMappings || {},
-        channel: body.channel || { id: "primary", name: "Primary WhatsApp" },
+        channel: launchConfig?.channel
+          ? {
+              id: launchConfig.channel._id.toString(),
+              name: launchConfig.channel.name || launchConfig.channel.displayName || "WhatsApp Channel",
+              phoneNumber: launchConfig.channel.phoneNumber || "",
+              phoneNumberId: launchConfig.channel.phoneNumberId || launchConfig.channel.phone_number_id || "",
+              wabaId: launchConfig.channel.wabaId || launchConfig.channel.waba_id || "",
+            }
+          : body.channel || null,
         schedule: body.schedule || { type: "now" },
         sendingSettings: body.sendingSettings || {},
         rateLimit: body.rateLimit || {},
@@ -180,7 +242,7 @@ export const campaignsController = {
       });
     } catch (err) {
       console.error("[campaignsController.createCampaign] error:", err);
-      return res.status(500).json({ error: err.message || "Failed to create campaign" });
+      return res.status(err.status || 500).json({ error: err.message || "Failed to create campaign" });
     }
   },
 
@@ -280,10 +342,17 @@ export const campaignsController = {
   async startCampaign(req, res) {
     try {
       const { id } = req.params;
+      const campaign = await collection(collections.campaigns).findOne({
+        _id: parseId(id),
+        ...accountScope(req.accountId),
+      });
+      if (!campaign) return res.status(404).json({ error: "Campaign not found" });
+      const audienceResult = await campaignWorker.validateAudience(req.accountId, campaign.audience || {});
+      await validateCampaignLaunch(req, campaign, audienceResult);
       const result = await campaignWorker.startCampaign(req.accountId, req.userId, id);
       return res.json(result);
     } catch (err) {
-      return res.status(400).json({ error: err.message || "Failed to start campaign" });
+      return res.status(err.status || 400).json({ error: err.message || "Failed to start campaign" });
     }
   },
 
@@ -336,7 +405,9 @@ export const campaignsController = {
         eligible: result.eligibleCount,
         optedOut: result.optedOutCount,
         invalid: result.invalidCount,
+        duplicate: result.duplicateCount,
         duplicates: result.duplicateCount,
+        excluded: result.optedOutCount + result.invalidCount + result.duplicateCount,
       });
     } catch (err) {
       return res.status(500).json({ error: err.message || "Audience validation failed" });

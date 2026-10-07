@@ -1,6 +1,7 @@
 import express from "express";
 import { requireAuth } from "../middleware/auth.js";
 import { attachAccount, requireAccountRole } from "../middleware/account-context.js";
+import { requireFeature } from "../middleware/subscription-guard.js";
 import { campaignsController } from "../controllers/campaigns-controller.js";
 
 const router = express.Router();
@@ -10,7 +11,7 @@ router.use(attachAccount);
 
 // Collection operations
 router.get("/", requireAccountRole("viewer"), campaignsController.listCampaigns);
-router.post("/", requireAccountRole("agent"), campaignsController.createCampaign);
+router.post("/", requireAccountRole("agent"), requireFeature("campaigns"), campaignsController.createCampaign);
 router.post("/validate-audience", requireAccountRole("agent"), campaignsController.validateAudienceEndpoint);
 
 // Single campaign operations

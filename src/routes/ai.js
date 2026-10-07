@@ -4,6 +4,7 @@ import { resourceController } from "../controllers/resource-controller.js";
 import { collections } from "../models/collection-models.js";
 import { requireAuth } from "../middleware/auth.js";
 import { attachAccount, requireAccountRole } from "../middleware/account-context.js";
+import { requireFeature } from "../middleware/subscription-guard.js";
 import { collection, accountScope } from "../utils/crud.js";
 import { resourceRoute } from "./resource-route.js";
 
@@ -30,7 +31,7 @@ router.get("/config", async (req, res) => {
   res.json({ config: null });
 });
 
-router.post("/config", requireAccountRole("admin"), async (req, res) => {
+router.post("/config", requireAccountRole("admin"), requireFeature("ai_agent"), async (req, res) => {
   const incoming = { ...(req.body ?? {}) };
   // Protect against saving masked bullets
   if (incoming.apiKey && incoming.apiKey.includes("••••")) {
@@ -41,12 +42,12 @@ router.post("/config", requireAccountRole("admin"), async (req, res) => {
   res.json({ ok: true });
 });
 
-router.delete("/config", requireAccountRole("admin"), async (req, res) => {
+router.delete("/config", requireAccountRole("admin"), requireFeature("ai_agent"), async (req, res) => {
   await collection(collections.aiConfig).deleteMany(accountScope(req.accountId));
   res.json({ ok: true });
 });
 
-router.post("/draft", requireAccountRole("agent"), async (req, res) => {
+router.post("/draft", requireAccountRole("agent"), requireFeature("ai_agent"), async (req, res) => {
   try {
     const draft = await generateAiText(req.accountId, [
       { role: "system", content: "Write a concise, helpful WhatsApp business reply." },

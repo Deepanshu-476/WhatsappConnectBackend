@@ -161,13 +161,11 @@ export const crmSettingsController = {
   async testIntegration(req, res) {
     try {
       const { integrationId, key } = req.body || {};
-      // Return simulated verified status for integration test
-      return res.json({
-        ok: true,
+      return res.status(424).json({
+        ok: false,
         integrationId: integrationId || key,
-        status: "connected",
-        latencyMs: Math.floor(Math.random() * 80) + 40,
-        message: `${integrationId || key || "Service"} connection verified successfully.`,
+        status: "configuration_required",
+        message: `${integrationId || key || "Service"} cannot be verified until real credentials and a provider-specific verifier are configured.`,
         testedAt: new Date().toISOString(),
       });
     } catch (err) {
@@ -178,14 +176,12 @@ export const crmSettingsController = {
   async testChannel(req, res) {
     try {
       const { channelId, phoneNumber } = req.body || {};
-      return res.json({
-        ok: true,
+      return res.status(424).json({
+        ok: false,
         channelId,
         phoneNumber,
-        status: "connected",
-        qualityRating: "GREEN",
-        messagingTier: "TIER_100K",
-        message: `WhatsApp channel ${phoneNumber || channelId || ""} is active and responding.`,
+        status: "configuration_required",
+        message: "WhatsApp channel verification requires stored Meta credentials and a live Meta Graph API check. No live connection was verified.",
         testedAt: new Date().toISOString(),
       });
     } catch (err) {

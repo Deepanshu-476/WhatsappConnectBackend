@@ -1,5 +1,6 @@
 export const collections = {
   accounts: "accounts",
+  auditLogs: "audit_logs",
   aiConfig: "ai_configs",
   aiKnowledge: "ai_knowledge",
   apiKeys: "api_keys",
@@ -38,4 +39,9 @@ export const collections = {
   whatsappTemplates: "whatsapp_templates",
   crmSettings: "crm_settings",
   campaignSettings: "campaign_settings",
+  subscriptions: "subscriptions",
+  subscriptionPlans: "subscription_plans",
+  payments: "payments",
+  businessDetails: "business_details",
+  billingAddons: "billing_addons",
 };

@@ -143,6 +143,68 @@ export async function metaRequest(path, { accessToken, method = "GET", body, hea
   return readMetaResponse(response, `Meta API error: ${response.status}`);
 }
 
+export function normalizeChannelCredentials(channel = {}) {
+  return {
+    accessToken: channel.accessToken || channel.access_token || channel.token || "",
+    phoneNumberId: channel.phoneNumberId || channel.phone_number_id || "",
+    wabaId: channel.wabaId || channel.waba_id || "",
+  };
+}
+
+export async function verifyWhatsAppChannel(channel = {}) {
+  const credentials = normalizeChannelCredentials(channel);
+  const missing = [];
+  if (!credentials.accessToken) missing.push("access token");
+  if (!credentials.phoneNumberId) missing.push("phone number id");
+  if (!credentials.wabaId) missing.push("WABA id");
+
+  if (missing.length) {
+    return {
+      ok: false,
+      status: "configuration_required",
+      connectionState: "configuration_required",
+      webhookStatus: "unknown",
+      missing,
+      message: `Missing Meta configuration: ${missing.join(", ")}.`,
+    };
+  }
+
+  try {
+    const [phone, business] = await Promise.all([
+      metaRequest(
+        `/${credentials.phoneNumberId}?fields=id,display_phone_number,verified_name,quality_rating,messaging_limit_tier,name_status`,
+        { accessToken: credentials.accessToken },
+      ),
+      metaRequest(`/${credentials.wabaId}?fields=id,name`, { accessToken: credentials.accessToken }),
+    ]);
+
+    return {
+      ok: true,
+      status: "connected",
+      connectionState: "connected",
+      webhookStatus: "unknown",
+      phoneNumberId: phone.id || credentials.phoneNumberId,
+      phoneNumber: phone.display_phone_number || channel.phoneNumber || channel.phone_number || "",
+      displayName: phone.verified_name || channel.displayName || channel.display_name || "",
+      wabaId: business.id || credentials.wabaId,
+      businessName: business.name || channel.businessName || "",
+      qualityRating: phone.quality_rating || "UNKNOWN",
+      messagingLimit: phone.messaging_limit_tier || "UNKNOWN",
+      nameStatus: phone.name_status || "UNKNOWN",
+      message: "Meta channel credentials verified.",
+    };
+  } catch (err) {
+    const isAuth = err?.status === 401 || err?.status === 403 || err?.code === "missing_token";
+    return {
+      ok: false,
+      status: isAuth ? "authentication_failed" : "unknown_error",
+      connectionState: isAuth ? "authentication_failed" : "unknown_error",
+      webhookStatus: "unknown",
+      message: err.message || "Meta channel verification failed.",
+    };
+  }
+}
+
 export async function getWhatsAppConfig(accountId) {
   const config = await collection(collections.whatsappConfig).findOne(accountScope(accountId));
   if (!config?.phone_number_id || !config?.access_token) {

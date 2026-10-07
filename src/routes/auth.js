@@ -13,6 +13,10 @@ import {
   setSessionCookie,
   signSession,
 } from "../middleware/auth.js";
+import {
+  createTrialSubscription,
+  getAuthoritativeSubscription,
+} from "../services/subscription-service.js";
 
 const router = express.Router();
 
@@ -176,6 +180,9 @@ async function buildAuthPayload(userId) {
   const account = member
     ? await Account.findById(member.accountId).lean()
     : null;
+  const subscription = member
+    ? await getAuthoritativeSubscription(member.accountId)
+    : null;
 
   return {
     user: publicUser(user),
@@ -196,6 +203,7 @@ async function buildAuthPayload(userId) {
           default_currency: account.defaultCurrency ?? "USD",
         }
       : null,
+    subscription,
   };
 }
 
@@ -235,6 +243,9 @@ router.post("/signup", async (req, res) => {
       userId: user._id,
       role: "owner",
     });
+
+    // Automatically provision 7-day free trial
+    await createTrialSubscription(account._id);
 
     const token = signSession(user._id.toString());
     setSessionCookie(res, token);
