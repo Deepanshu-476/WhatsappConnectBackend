@@ -27,7 +27,17 @@ export function publicDoc(doc) {
 }
 
 export function accountScope(accountId) {
-  return { $or: [{ accountId }, { account_id: accountId }] };
+  if (!accountId) return {};
+  const parsed = parseId(accountId);
+  const str = accountId.toString();
+  return {
+    $or: [
+      { accountId: parsed },
+      { accountId: str },
+      { account_id: parsed },
+      { account_id: str },
+    ],
+  };
 }
 
 export function timestamps(isNew = false) {

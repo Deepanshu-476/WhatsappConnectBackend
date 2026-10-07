@@ -346,6 +346,108 @@ router.post("/rpc/:fn", async (req, res) => {
       });
     }
 
+    if (fn === "create_broadcast_with_recipients") {
+      const {
+        p_account_id,
+        p_user_id,
+        p_name,
+        p_template_name,
+        p_template_language,
+        p_total_recipients,
+        p_contact_ids,
+        p_template_params,
+      } = args;
+
+      const broadcastsCol = getCollection("broadcasts");
+      const broadcastRecipientsCol = getCollection("broadcast_recipients");
+      const now = new Date().toISOString();
+
+      const broadcastDoc = {
+        account_id: parseId(p_account_id),
+        created_by_user_id: parseId(p_user_id),
+        name: p_name,
+        template_name: p_template_name,
+        template_language: p_template_language,
+        total_recipients: p_total_recipients,
+        status: "sending",
+        created_at: now,
+        updated_at: now,
+      };
+
+      const bRes = await broadcastsCol.insertOne(broadcastDoc);
+      const broadcastId = bRes.insertedId;
+
+      const recipientDocs = p_contact_ids.map((cid, i) => ({
+        broadcast_id: broadcastId,
+        contact_id: parseId(cid),
+        status: "pending",
+        template_params: p_template_params ? p_template_params[i] : null,
+        created_at: now,
+        updated_at: now,
+      }));
+
+      if (recipientDocs.length > 0) {
+        await broadcastRecipientsCol.insertMany(recipientDocs);
+      }
+
+      return res.json({
+        data: [{ id: broadcastId.toString() }],
+        error: null,
+      });
+    }
+
+    if (fn === "record_webhook_failure") {
+      const { endpoint_id, max_failures } = args;
+      const endpointsCol = getCollection("webhook_endpoints");
+      
+      const ep = await endpointsCol.findOne({ _id: parseId(endpoint_id) });
+      if (ep) {
+        const nextFailures = (ep.consecutive_failures || 0) + 1;
+        const updateDoc = {
+          $set: {
+            consecutive_failures: nextFailures,
+            updated_at: new Date().toISOString()
+          }
+        };
+        if (nextFailures >= max_failures) {
+          updateDoc.$set.status = "disabled";
+        }
+        await endpointsCol.updateOne({ _id: parseId(endpoint_id) }, updateDoc);
+      }
+      return res.json({ data: null, error: null });
+    }
+
+    if (fn === "increment_flow_execution_count") {
+      const { p_flow_id } = args;
+      const flowsCol = getCollection("flows");
+      await flowsCol.updateOne(
+        { _id: parseId(p_flow_id) },
+        { $inc: { execution_count: 1 }, $set: { updated_at: new Date().toISOString() } }
+      );
+      return res.json({ data: null, error: null });
+    }
+
+    if (fn === "increment_automation_execution_count") {
+      const { p_automation_id } = args;
+      const automationsCol = getCollection("automations");
+      await automationsCol.updateOne(
+        { _id: parseId(p_automation_id) },
+        { $inc: { total_executions: 1 }, $set: { updated_at: new Date().toISOString() } }
+      );
+      return res.json({ data: null, error: null });
+    }
+
+    if (fn === "claim_ai_reply_slot") {
+      const { conversation_id, max_replies } = args;
+      const convsCol = getCollection("conversations");
+      const result = await convsCol.findOneAndUpdate(
+        { _id: parseId(conversation_id), $expr: { $lt: [{ $ifNull: ["$ai_reply_count", 0] }, max_replies] } },
+        { $inc: { ai_reply_count: 1 }, $set: { updated_at: new Date().toISOString() } },
+        { returnDocument: 'after' }
+      );
+      return res.json({ data: !!result, error: null });
+    }
+
     // Generic RPC fallback
     return res.json({ data: [], error: null });
   } catch (err) {

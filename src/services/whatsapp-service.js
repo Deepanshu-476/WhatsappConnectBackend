@@ -30,6 +30,96 @@ export function normalizePhone(value = "") {
   return String(value).replace(/[^\d]/g, "");
 }
 
+const DEFAULT_OPT_OUT_KEYWORDS = ["STOP", "UNSUBSCRIBE", "CANCEL", "QUIT"];
+
+function recipientFields(to) {
+  const target = String(to || "").trim();
+  if (!target) throw new ApiError("Recipient phone is required", 400, "bad_request");
+  return { recipient_type: "individual", to: normalizePhone(target) || target };
+}
+
+function assertMax(value, max, label) {
+  if (value && String(value).length > max) {
+    throw new ApiError(`${label} exceeds the ${max}-character limit`, 400, "bad_request");
+  }
+}
+
+export function buildInteractivePayload(payload = {}) {
+  if (!payload || typeof payload !== "object") {
+    throw new ApiError("interactive_payload is required", 400, "bad_request");
+  }
+  const body = String(payload.body || "").trim();
+  if (!body) throw new ApiError("Interactive message body text is required", 400, "bad_request");
+  assertMax(body, 1024, "Interactive body");
+  assertMax(payload.header, 60, "Interactive header");
+  assertMax(payload.footer, 60, "Interactive footer");
+
+  const interactive = { body: { text: body } };
+  if (payload.header) interactive.header = { type: "text", text: String(payload.header) };
+  if (payload.footer) interactive.footer = { text: String(payload.footer) };
+
+  if (payload.kind === "buttons") {
+    const buttons = Array.isArray(payload.buttons) ? payload.buttons : [];
+    if (buttons.length < 1 || buttons.length > 3) {
+      throw new ApiError("Interactive button messages require 1-3 buttons", 400, "bad_request");
+    }
+    const seen = new Set();
+    interactive.type = "button";
+    interactive.action = {
+      buttons: buttons.map((button) => {
+        const id = String(button?.id || "").trim();
+        const title = String(button?.title || "").trim();
+        if (!id || !title) throw new ApiError("Every interactive button needs an id and title", 400, "bad_request");
+        if (seen.has(id)) throw new ApiError(`Duplicate interactive button id "${id}"`, 400, "bad_request");
+        seen.add(id);
+        assertMax(title, 20, "Interactive button title");
+        return { type: "reply", reply: { id, title } };
+      }),
+    };
+    return interactive;
+  }
+
+  if (payload.kind === "list") {
+    const buttonLabel = String(payload.button_label || "").trim();
+    const sections = Array.isArray(payload.sections) ? payload.sections : [];
+    if (!buttonLabel) throw new ApiError("Interactive list button label is required", 400, "bad_request");
+    assertMax(buttonLabel, 20, "Interactive list button label");
+    if (sections.length < 1 || sections.length > 10) {
+      throw new ApiError("Interactive lists require 1-10 sections", 400, "bad_request");
+    }
+    const seen = new Set();
+    let totalRows = 0;
+    interactive.type = "list";
+    interactive.action = {
+      button: buttonLabel,
+      sections: sections.map((section) => {
+        const rows = Array.isArray(section?.rows) ? section.rows : [];
+        if (!rows.length) throw new ApiError("Every interactive list section needs rows", 400, "bad_request");
+        return {
+          ...(section?.title ? { title: String(section.title) } : {}),
+          rows: rows.map((row) => {
+            totalRows += 1;
+            const id = String(row?.id || "").trim();
+            const title = String(row?.title || "").trim();
+            if (!id || !title) throw new ApiError("Every interactive list row needs an id and title", 400, "bad_request");
+            if (seen.has(id)) throw new ApiError(`Duplicate interactive list row id "${id}"`, 400, "bad_request");
+            seen.add(id);
+            assertMax(title, 24, "Interactive list row title");
+            assertMax(row?.description, 72, "Interactive list row description");
+            return { id, title, ...(row?.description ? { description: String(row.description) } : {}) };
+          }),
+        };
+      }),
+    };
+    if (totalRows < 1 || totalRows > 10) {
+      throw new ApiError("Interactive lists require 1-10 rows total", 400, "bad_request");
+    }
+    return interactive;
+  }
+
+  throw new ApiError("Interactive message must be reply buttons or a list", 400, "bad_request");
+}
+
 async function readMetaResponse(response, fallback) {
   const data = await response.json().catch(() => null);
   if (!response.ok) {
@@ -70,9 +160,8 @@ export async function sendMetaMessage(config, payload) {
   return data?.messages?.[0]?.id || null;
 }
 
-export function buildMetaPayload({ to, message_type, content_text, media_url, filename, template_name, template_language, template_params }) {
-  if (!to) throw new ApiError("Recipient phone is required", 400, "bad_request");
-  const base = { recipient_type: "individual", to: normalizePhone(to) || to };
+export function buildMetaPayload({ to, message_type, content_text, media_url, filename, template_name, template_language, template_params, interactive_payload }) {
+  const base = recipientFields(to);
   if (message_type === "template") {
     if (!template_name) throw new ApiError("template_name is required", 400, "bad_request");
     const components = Array.isArray(template_params) && template_params.length
@@ -96,7 +185,7 @@ export function buildMetaPayload({ to, message_type, content_text, media_url, fi
     return { ...base, type: message_type, [message_type]: media };
   }
   if (message_type === "interactive") {
-    throw new ApiError("Interactive send is not supported by this Express backend yet", 400, "bad_request");
+    return { ...base, type: "interactive", interactive: buildInteractivePayload(interactive_payload) };
   }
   if (!content_text) throw new ApiError("content_text is required", 400, "bad_request");
   return { ...base, type: "text", text: { body: content_text } };
@@ -128,12 +217,50 @@ export async function findOrCreateConversation(accountId, userId, contactId) {
   const existing = await collection(collections.conversations).findOne({
     $and: [accountScope(accountId), { $or: [{ contact_id: contactId.toString() }, { contactId: contactId.toString() }] }],
   });
-  if (existing) return existing;
+
+  const crmSettings = await collection("crm_settings").findOne(accountScope(accountId));
+  const convSettings = crmSettings?.conversationSettings || {};
+  const assignSettings = crmSettings?.assignmentSettings || {};
+  const defaultStatus = convSettings.statuses?.find((s) => s.isDefault)?.id || "open";
+
+  if (existing) {
+    if (existing.status === "closed") {
+      const allowReopen = convSettings.allowReopen ?? true;
+      if (allowReopen && convSettings.reopenClosedConversations !== false) {
+        await collection(collections.conversations).updateOne(
+          { _id: existing._id },
+          { $set: { status: defaultStatus, updated_at: new Date().toISOString() } },
+        );
+        existing.status = defaultStatus;
+      }
+    }
+    return existing;
+  }
+
+  let assignedTo = null;
+  const isAutoAssign = convSettings.autoAssignment?.enabled || assignSettings.autoAssignment;
+  if (isAutoAssign) {
+    const method = convSettings.autoAssignment?.method || assignSettings.mode || "round_robin";
+    if (method === "round_robin" || assignSettings.roundRobin) {
+      const members = await collection("account_members").find(accountScope(accountId)).toArray();
+      if (members.length > 0) {
+        const lastAssigned = await collection(collections.conversations)
+          .findOne({ ...accountScope(accountId), assigned_to: { $exists: true, $ne: null } }, { sort: { created_at: -1 } });
+        const lastIdx = lastAssigned ? members.findIndex((m) => m.userId?.toString() === lastAssigned.assigned_to) : -1;
+        const nextMember = members[(lastIdx + 1) % members.length];
+        assignedTo = nextMember?.userId?.toString() || null;
+      }
+    } else if (convSettings.autoAssignment?.defaultUserId || assignSettings.defaultUserId) {
+      assignedTo = convSettings.autoAssignment?.defaultUserId || assignSettings.defaultUserId;
+    }
+  }
+
   const doc = {
     accountId,
     userId,
     contact_id: contactId.toString(),
-    status: "open",
+    status: defaultStatus,
+    ...(assignedTo ? { assigned_to: assignedTo, assigned_user_id: assignedTo } : {}),
     unread_count: 0,
     ...timestamps(true),
   };
@@ -151,6 +278,7 @@ export async function persistOutboundMessage({ accountId, userId, conversation, 
     content_text: input.content_text || null,
     media_url: input.media_url || null,
     template_name: input.template_name || null,
+    interactive_payload: input.message_type === "interactive" ? input.interactive_payload : null,
     message_id: whatsappMessageId,
     status,
     ...timestamps(true),
@@ -158,9 +286,95 @@ export async function persistOutboundMessage({ accountId, userId, conversation, 
   const result = await collection(collections.messages).insertOne(doc);
   await collection(collections.conversations).updateOne(
     { _id: conversation._id },
-    { $set: { last_message_text: doc.content_text || doc.template_name || `[${doc.content_type}]`, last_message_at: doc.created_at, updated_at: doc.updated_at } },
+    { $set: { last_message_text: doc.content_text || doc.template_name || doc.interactive_payload?.body || `[${doc.content_type}]`, last_message_at: doc.created_at, updated_at: doc.updated_at } },
   );
   return { _id: result.insertedId, ...doc };
+}
+
+export async function enforceInboundOptOut({ accountId, contact, text }) {
+  const normalizedText = String(text || "").trim().toUpperCase();
+  if (!normalizedText) return false;
+  const setting = await collection(collections.settings).findOne({ ...accountScope(accountId), key: "opt_out_keywords" });
+  const keywords = Array.isArray(setting?.value) && setting.value.length
+    ? setting.value.map((value) => String(value).trim().toUpperCase()).filter(Boolean)
+    : DEFAULT_OPT_OUT_KEYWORDS;
+  if (!keywords.includes(normalizedText)) return false;
+  const now = new Date().toISOString();
+  await collection(collections.optOuts).updateOne(
+    { ...accountScope(accountId), contact_id: contact._id.toString(), channel: "whatsapp" },
+    {
+      $set: {
+        accountId,
+        contact_id: contact._id.toString(),
+        channel: "whatsapp",
+        keyword: normalizedText,
+        phone: contact.phone || contact.wa_id || null,
+        opted_out_at: now,
+        updated_at: now,
+      },
+      $setOnInsert: { created_at: now },
+    },
+    { upsert: true },
+  );
+  await collection(collections.contacts).updateOne(
+    { _id: contact._id, ...accountScope(accountId) },
+    { $set: { opted_out: true, opted_out_at: now, updated_at: now } },
+  );
+  return true;
+}
+
+export async function sendReactionForAccount({ accountId, userId, messageId, emoji }) {
+  if (!messageId) throw new ApiError("message_id is required", 400, "bad_request");
+  if (typeof emoji !== "string") throw new ApiError("emoji must be a string", 400, "bad_request");
+
+  const target = await collection(collections.messages).findOne({
+    $and: [accountScope(accountId), { $or: [{ _id: parseId(messageId) }, { message_id: messageId }] }],
+  });
+  if (!target) throw new ApiError("Message not found", 404, "not_found");
+  if (!target.message_id) {
+    throw new ApiError("Cannot react to a message that has not been sent to WhatsApp", 400, "bad_request");
+  }
+
+  const conversation = await collection(collections.conversations).findOne({
+    _id: parseId(target.conversation_id || target.conversationId),
+    ...accountScope(accountId),
+  });
+  if (!conversation) throw new ApiError("Conversation not found", 404, "not_found");
+  const contact = await collection(collections.contacts).findOne({
+    _id: parseId(conversation.contact_id || conversation.contactId),
+    ...accountScope(accountId),
+  });
+  if (!contact) throw new ApiError("Contact not found", 404, "not_found");
+
+  const config = await getWhatsAppConfig(accountId);
+  const to = contact.phone || contact.wa_id;
+  const reactionMessageId = await sendMetaMessage(config, {
+    ...recipientFields(to),
+    type: "reaction",
+    reaction: { message_id: target.message_id, emoji },
+  });
+
+  const selector = {
+    accountId,
+    message_id: target.message_id,
+    sender_type: "agent",
+    userId,
+  };
+  if (!emoji) {
+    await collection(collections.messageReactions).deleteMany({
+      ...accountScope(accountId),
+      message_id: target.message_id,
+      sender_type: "agent",
+      userId,
+    });
+  } else {
+    await collection(collections.messageReactions).updateOne(
+      selector,
+      { $set: { ...selector, emoji, reaction_message_id: reactionMessageId, updated_at: new Date().toISOString() }, $setOnInsert: { created_at: new Date().toISOString() } },
+      { upsert: true },
+    );
+  }
+  return { whatsapp_message_id: reactionMessageId, removed: !emoji };
 }
 
 export async function sendMessageForAccount({ accountId, userId, conversationId, contactId, body, senderType = "agent" }) {
@@ -246,6 +460,7 @@ export async function processInboundWebhook(payload) {
           { _id: conversation._id },
           { $set: { last_message_text: doc.content_text || `[${contentType}]`, last_message_at: doc.created_at, updated_at: doc.updated_at }, $inc: { unread_count: 1 } },
         );
+        await enforceInboundOptOut({ accountId, contact, text: doc.content_text });
         results.push({ type: "message", id: message.id });
       }
     }
@@ -341,6 +556,21 @@ export async function sendBroadcast(accountId, userId, body = {}) {
   let sent = 0;
   for (const contact of contacts) {
     try {
+      const activeOptOut = contact.opted_out || await collection(collections.optOuts).findOne({
+        ...accountScope(accountId),
+        channel: "whatsapp",
+        $or: [
+          { contact_id: contact._id.toString() },
+          { phone: contact.phone },
+          { phone: contact.wa_id },
+        ],
+      });
+      if (activeOptOut) {
+        throw new ApiError("Contact has opted out of WhatsApp campaigns", 409, "contact_opted_out");
+      }
+      if (contact.dnd_until && new Date(contact.dnd_until).getTime() > Date.now()) {
+        throw new ApiError("Contact is currently in DND window", 409, "contact_dnd");
+      }
       await sendMessageForAccount({
         accountId,
         userId,
